@@ -125,15 +125,34 @@ class RequestsUtils():
         """
         if request_type == 'proxy, no cookie':
             if self.ip_proxy:
-                # 这个while是处理代理失效的问题（通常是超时等问题）
-                r = requests.get(url, headers=self.get_header(None, False), proxies=self.get_proxy(), timeout=10)
-                # 接口专属请求做过重试了（max retry），因此这里的while暂时不用
-                # while True:
-                #     try:
-                #         r = requests.get(url, headers=self.get_header(None, False), proxies=self.get_proxy(), timeout=5)
-                #         break
-                #     except:
-                #         pass
+                # 增加代理重试机制
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        proxy = self.get_proxy()
+                        if proxy is None:
+                            logger.error('无法获取有效代理')
+                            # 如果没有代理，尝试不使用代理
+                            r = requests.get(url, headers=self.get_header(None, False))
+                            break
+                        
+                        r = requests.get(url, headers=self.get_header(None, False), proxies=proxy, timeout=10)
+                        break
+                    except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as e:
+                        logger.warning(f'代理请求失败 (重试 {retry + 1}/{max_retries}): {e}')
+                        if retry == max_retries - 1:
+                            # 最后一次重试失败，尝试不使用代理
+                            logger.warning('代理重试失败，尝试不使用代理')
+                            r = requests.get(url, headers=self.get_header(None, False))
+                        else:
+                            # 清除失效的代理，获取新代理
+                            if hasattr(self, 'proxy_pool') and len(self.proxy_pool) > 0:
+                                self.proxy_pool.pop(0)
+                            time.sleep(1)  # 短暂等待后重试
+                    except Exception as e:
+                        logger.error(f'代理请求出现未知错误: {e}')
+                        r = requests.get(url, headers=self.get_header(None, False))
+                        break
             else:
                 r = requests.get(url, headers=self.get_header(None, False))
             return self.handle_verify(r, url, request_type)
@@ -146,7 +165,34 @@ class RequestsUtils():
             header = self.get_header(cookie=cur_cookie, need_cookie=True)
 
             if self.ip_proxy:
-                r = requests.get(url, headers=header, proxies=self.get_proxy(), timeout=10)
+                # 增加代理重试机制
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        proxy = self.get_proxy()
+                        if proxy is None:
+                            logger.error('无法获取有效代理')
+                            # 如果没有代理，尝试不使用代理
+                            r = requests.get(url, headers=header)
+                            break
+                        
+                        r = requests.get(url, headers=header, proxies=proxy, timeout=10)
+                        break
+                    except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as e:
+                        logger.warning(f'代理请求失败 (重试 {retry + 1}/{max_retries}): {e}')
+                        if retry == max_retries - 1:
+                            # 最后一次重试失败，尝试不使用代理
+                            logger.warning('代理重试失败，尝试不使用代理')
+                            r = requests.get(url, headers=header)
+                        else:
+                            # 清除失效的代理，获取新代理
+                            if hasattr(self, 'proxy_pool') and len(self.proxy_pool) > 0:
+                                self.proxy_pool.pop(0)
+                            time.sleep(1)  # 短暂等待后重试
+                    except Exception as e:
+                        logger.error(f'代理请求出现未知错误: {e}')
+                        r = requests.get(url, headers=header)
+                        break
             else:
                 r = requests.get(url, headers=header)
 
@@ -187,7 +233,7 @@ class RequestsUtils():
             一定程度上丧失了cookie池的意义，如果不处理，失效的太快。
             暂时处理
             """
-            if request_type is not 'proxy, no cookie' or not spider_config.USE_PROXY:
+            if request_type != 'proxy, no cookie' or not spider_config.USE_PROXY:
                 print('处理验证码，按任意键回车后继续', r.url)
                 input()
             else:
@@ -304,19 +350,70 @@ class RequestsUtils():
             # 代理池为空，提取代理
             if len(self.proxy_pool) == 0:
                 proxy_url = spider_config.HTTP_LINK
-                r = requests.get(proxy_url)
-                r_json = r.json()
-                # json解析方式替换
-                # for proxy in r_json['Data']:
-                for proxy in r_json:
-                    # 重复添加，多次利用
-                    for _ in range(repeat_nub):
-                        # self.proxy_pool.append([proxy['Ip'], proxy['Port']])
-                        self.proxy_pool.append([proxy['ip'], proxy['port']])
+                if not proxy_url:
+                    logger.error('未配置代理API地址')
+                    return None
+                
+                try:
+                    r = requests.get(proxy_url, timeout=10)
+                    r_json = r.json()
+                    print(r_json)
+                    
+                    # 检查API响应格式
+                    if 'data' in r_json:
+                        for proxy in r_json['data']:
+                            # 处理新的API格式：从server字段提取IP和端口
+                            if 'server' in proxy and ':' in proxy['server']:
+                                # server字段格式：IP:PORT
+                                server_parts = proxy['server'].split(':')
+                                ip = server_parts[0]
+                                port = server_parts[1]
+                                print(f"从server字段提取: IP={ip}, PORT={port}")
+                            # 兼容旧的API格式：proxy_ip + port
+                            elif 'proxy_ip' in proxy and 'port' in proxy:
+                                ip = proxy['proxy_ip']
+                                port = proxy['port']
+                                print(f"从proxy_ip+port提取: IP={ip}, PORT={port}")
+                            # 兼容更旧的API格式：Ip + Port
+                            elif 'Ip' in proxy and 'Port' in proxy:
+                                ip = proxy['Ip']
+                                port = proxy['Port']
+                                print(f"从Ip+Port提取: IP={ip}, PORT={port}")
+                            else:
+                                logger.warning(f'未知的代理数据格式: {proxy}')
+                                continue
+                            
+                            # 重复添加，多次利用
+                            for _ in range(repeat_nub):
+                                self.proxy_pool.append([ip, port])
+                        
+                        logger.info(f'成功获取 {len(r_json["data"])} 个代理，代理池大小: {len(self.proxy_pool)}')
+                    else:
+                        logger.error(f'代理API返回格式错误: {r_json}')
+                        return None
+                        
+                except Exception as e:
+                    logger.error(f'获取代理失败: {e}')
+                    return None
+            
             # 获取ip
-            proxies = self.http_proxy_utils(self.proxy_pool[0][0], self.proxy_pool[0][1])
-            self.proxy_pool.remove(self.proxy_pool[0])
-            return proxies
+            if len(self.proxy_pool) > 0:
+                # 测试代理可用性
+                proxy_info = self.proxy_pool[0]
+                if self.test_proxy(proxy_info[0], proxy_info[1]):
+                    proxies = self.http_proxy_utils(proxy_info[0], proxy_info[1])
+                    self.proxy_pool.remove(proxy_info)
+                    logger.info(f'使用代理: {proxy_info[0]}:{proxy_info[1]}')
+                    return proxies
+                else:
+                    # 代理不可用，移除并尝试下一个
+                    logger.warning(f'代理 {proxy_info[0]}:{proxy_info[1]} 不可用，移除')
+                    self.proxy_pool.remove(proxy_info)
+                    # 递归调用获取下一个代理
+                    return self.get_proxy()
+            else:
+                logger.error('代理池为空，无法获取代理')
+                return None
         # 秘钥提取模式
         elif spider_config.KEY_EXTRACT:
             proxies = self.key_proxy_utils()
@@ -325,6 +422,39 @@ class RequestsUtils():
             logger.warning('使用代理时，必须选择http提取或秘钥提取中的一个')
             exit()
         pass
+
+    def test_proxy(self, ip, port, timeout=5):
+        """
+        测试代理是否可用
+        @param ip: 代理IP
+        @param port: 代理端口
+        @param timeout: 超时时间
+        @return: 是否可用
+        """
+        # 增加重试机制
+        max_retries = 2
+        for retry in range(max_retries):
+            try:
+                proxy = self.http_proxy_utils(ip, port)
+                test_url = "http://httpbin.org/ip"
+                response = requests.get(test_url, proxies=proxy, timeout=timeout)
+                if response.status_code == 200:
+                    logger.debug(f'代理 {ip}:{port} 测试成功')
+                    return True
+            except requests.exceptions.ProxyError as e:
+                logger.debug(f'代理 {ip}:{port} 代理错误 (重试 {retry + 1}/{max_retries}): {e}')
+            except requests.exceptions.ConnectTimeout as e:
+                logger.debug(f'代理 {ip}:{port} 连接超时 (重试 {retry + 1}/{max_retries}): {e}')
+            except requests.exceptions.ReadTimeout as e:
+                logger.debug(f'代理 {ip}:{port} 读取超时 (重试 {retry + 1}/{max_retries}): {e}')
+            except Exception as e:
+                logger.debug(f'代理 {ip}:{port} 测试失败 (重试 {retry + 1}/{max_retries}): {e}')
+            
+            if retry < max_retries - 1:
+                time.sleep(1)  # 重试前等待1秒
+        
+        logger.debug(f'代理 {ip}:{port} 测试失败，已重试 {max_retries} 次')
+        return False
 
     def http_proxy_utils(self, ip, port):
         """

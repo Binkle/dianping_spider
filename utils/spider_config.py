@@ -23,6 +23,7 @@ from utils.config import global_config, require_config
 from utils.logger import logger
 
 
+
 class Config():
     """
     全局配置类，不再动态加载
@@ -30,6 +31,12 @@ class Config():
     """
 
     def __init__(self):
+        # config 的数据库
+        self.MYSQL_HOST = 'localhost'
+        self.MYSQL_PORT = 3306
+        self.MYSQL_USER = 'xtrip'
+        self.MYSQL_PASSWORD = 'Woshidi1!!'
+        self.MYSQL_DATABASE = 'xtrip'
         # config 的 config
         self.USE_COOKIE_POOL = True if global_config.getRaw('config', 'use_cookie_pool') == 'True' else False
         self.COOKIE = global_config.getRaw('config', 'Cookie')
