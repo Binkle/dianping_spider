@@ -34,6 +34,7 @@ from utils.logger import logger
 from utils.get_file_map import get_map
 from utils.cookie_utils import cookie_cache
 from utils.spider_config import spider_config
+from utils.smart_proxy_manager import smart_proxy_manager
 
 
 class RequestsUtils():
@@ -110,11 +111,11 @@ class RequestsUtils():
             self.freeze_time()
 
             if request_type == 'no proxy, no cookie':
-                r = requests.get(url, headers=self.get_header(cookie=None, need_cookie=False))
+                r = requests.get(url, headers=self.get_header(cookie=None, need_cookie=False, url=url))
 
             if request_type == 'no proxy, cookie':
                 cur_cookie = self.get_cookie(url)
-                r = requests.get(url, headers=self.get_header(cookie=cur_cookie, need_cookie=True))
+                r = requests.get(url, headers=self.get_header(cookie=cur_cookie, need_cookie=True, url=url))
 
             return self.handle_verify(r=r, url=url, request_type=request_type)
 
@@ -127,16 +128,26 @@ class RequestsUtils():
             if self.ip_proxy:
                 # 增加代理重试机制
                 max_retries = 3
+                current_proxy_server = None
                 for retry in range(max_retries):
                     try:
                         proxy = self.get_proxy()
                         if proxy is None:
                             logger.error('无法获取有效代理')
                             # 如果没有代理，尝试不使用代理
-                            r = requests.get(url, headers=self.get_header(None, False))
+                            r = requests.get(url, headers=self.get_header(None, False, url=url))
                             break
                         
-                        r = requests.get(url, headers=self.get_header(None, False), proxies=proxy, timeout=10)
+                        # 记录当前使用的代理
+                        current_proxy_server = self.extract_proxy_server(proxy)
+                        
+                        r = requests.get(url, headers=self.get_header(None, False, url=url), proxies=proxy, timeout=10)
+                        
+                        # 请求成功，标记代理使用（避免重复计数）
+                        if current_proxy_server:
+                            # 这里不调用mark_proxy_used，让proxy_feedback统一处理
+                            pass
+                        
                         break
                     except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as e:
                         logger.warning(f'代理请求失败 (重试 {retry + 1}/{max_retries}): {e}')
@@ -167,6 +178,7 @@ class RequestsUtils():
             if self.ip_proxy:
                 # 增加代理重试机制
                 max_retries = 3
+                current_proxy_server = None
                 for retry in range(max_retries):
                     try:
                         proxy = self.get_proxy()
@@ -176,7 +188,16 @@ class RequestsUtils():
                             r = requests.get(url, headers=header)
                             break
                         
+                        # 记录当前使用的代理
+                        current_proxy_server = self.extract_proxy_server(proxy)
+                        
                         r = requests.get(url, headers=header, proxies=proxy, timeout=10)
+                        
+                        # 请求成功，标记代理使用（避免重复计数）
+                        if current_proxy_server:
+                            # 这里不调用mark_proxy_used，让proxy_feedback统一处理
+                            pass
+                        
                         break
                     except (requests.exceptions.ProxyError, requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout) as e:
                         logger.warning(f'代理请求失败 (重试 {retry + 1}/{max_retries}): {e}')
@@ -210,18 +231,35 @@ class RequestsUtils():
 
     def freeze_time(self):
         """
-        时间暂停术！
+        时间暂停术！增强随机性和人性化间隔
         @return:
         """
+        import random
+        
         self.global_time += 1
+        
+        # 每次请求都添加基础随机延迟，模拟人类行为
+        base_delay = random.uniform(1.5, 4.0)  # 1.5-4秒随机延迟
+        time.sleep(base_delay)
+        
         if self.global_time != 1:
             for each_stop_time in self.stop_times:
                 if self.global_time % int(each_stop_time[0]) == 0:
-                    for i in tqdm(range(int(each_stop_time[1])), desc='全局等待'):
-                        import random
-                        sleep_time = 1 + (random.randint(1, 10) / 100)
+                    # 增加更大的随机性
+                    extra_wait = random.randint(0, int(each_stop_time[1]) // 3)
+                    total_wait = int(each_stop_time[1]) + extra_wait
+                    
+                    for i in tqdm(range(total_wait), desc='全局等待'):
+                        # 更自然的随机间隔
+                        sleep_time = random.uniform(0.8, 1.5)
                         time.sleep(sleep_time)
                     break
+        
+        # 随机性长暂停，模拟用户思考时间
+        if random.random() < 0.1:  # 10%概率触发长暂停
+            long_pause = random.uniform(10, 30)
+            print(f"模拟用户思考时间，暂停 {long_pause:.1f} 秒")
+            time.sleep(long_pause)
 
     def handle_verify(self, r, url, request_type):
         # 这里只做验证码处理，不做其他判断（例如403）
@@ -315,9 +353,9 @@ class RequestsUtils():
         else:
             return 'search'
 
-    def get_header(self, cookie, need_cookie=True):
+    def get_header(self, cookie, need_cookie=True, url=None):
         """
-        获取请求头
+        获取请求头，增强反检测能力
         :return:
         """
         if self.ua is not None:
@@ -329,99 +367,124 @@ class RequestsUtils():
         if cookie is None:
             cookie = self.cookie
 
-        if need_cookie:
-            header = {
-                'User-Agent': ua,
-                'Cookie': cookie
-            }
-        else:
-            header = {
-                'User-Agent': ua,
-            }
+        # 基础请求头
+        header = {
+            'User-Agent': ua,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'sec-ch-ua': '"Not;A=Brand";v="99", "Google Chrome";v="139", "Chromium";v="139"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'Cache-Control': 'max-age=0',
+        }
+
+        # 根据URL类型调整请求头
+        if url:
+            if 'ajax' in url or 'api' in url or '.json' in url:
+                header.update({
+                    'Accept': 'application/json, text/javascript, */*; q=0.01',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-origin',
+                })
+                # 为API请求添加Referer
+                if 'dianping.com' in url:
+                    header['Referer'] = 'https://www.dianping.com/'
+            
+            # 为跨域请求调整
+            if 'meituan.net' in url or 'meituan.com' in url:
+                header.update({
+                    'Origin': 'https://www.dianping.com',
+                    'Referer': 'https://www.dianping.com/',
+                    'Sec-Fetch-Site': 'cross-site',
+                })
+
+        if need_cookie and cookie:
+            header['Cookie'] = cookie
+
         return header
 
     def get_proxy(self):
         """
-        获取代理
+        获取代理 - 集成智能代理管理
         """
-        repeat_nub = spider_config.REPEAT_NUMBER
-        # http 提取模式
-        if spider_config.HTTP_EXTRACT:
-            # 代理池为空，提取代理
-            if len(self.proxy_pool) == 0:
-                proxy_url = spider_config.HTTP_LINK
-                if not proxy_url:
-                    logger.error('未配置代理API地址')
-                    return None
-                
-                try:
-                    r = requests.get(proxy_url, timeout=10)
-                    r_json = r.json()
-                    print(r_json)
-                    
-                    # 检查API响应格式
-                    if 'data' in r_json:
-                        for proxy in r_json['data']:
-                            # 处理新的API格式：从server字段提取IP和端口
-                            if 'server' in proxy and ':' in proxy['server']:
-                                # server字段格式：IP:PORT
-                                server_parts = proxy['server'].split(':')
-                                ip = server_parts[0]
-                                port = server_parts[1]
-                                print(f"从server字段提取: IP={ip}, PORT={port}")
-                            # 兼容旧的API格式：proxy_ip + port
-                            elif 'proxy_ip' in proxy and 'port' in proxy:
-                                ip = proxy['proxy_ip']
-                                port = proxy['port']
-                                print(f"从proxy_ip+port提取: IP={ip}, PORT={port}")
-                            # 兼容更旧的API格式：Ip + Port
-                            elif 'Ip' in proxy and 'Port' in proxy:
-                                ip = proxy['Ip']
-                                port = proxy['Port']
-                                print(f"从Ip+Port提取: IP={ip}, PORT={port}")
-                            else:
-                                logger.warning(f'未知的代理数据格式: {proxy}')
-                                continue
-                            
-                            # 重复添加，多次利用
-                            for _ in range(repeat_nub):
-                                self.proxy_pool.append([ip, port])
-                        
-                        logger.info(f'成功获取 {len(r_json["data"])} 个代理，代理池大小: {len(self.proxy_pool)}')
-                    else:
-                        logger.error(f'代理API返回格式错误: {r_json}')
-                        return None
-                        
-                except Exception as e:
-                    logger.error(f'获取代理失败: {e}')
-                    return None
-            
-            # 获取ip
-            if len(self.proxy_pool) > 0:
-                # 测试代理可用性
-                proxy_info = self.proxy_pool[0]
-                if self.test_proxy(proxy_info[0], proxy_info[1]):
-                    proxies = self.http_proxy_utils(proxy_info[0], proxy_info[1])
-                    self.proxy_pool.remove(proxy_info)
-                    logger.info(f'使用代理: {proxy_info[0]}:{proxy_info[1]}')
-                    return proxies
-                else:
-                    # 代理不可用，移除并尝试下一个
-                    logger.warning(f'代理 {proxy_info[0]}:{proxy_info[1]} 不可用，移除')
-                    self.proxy_pool.remove(proxy_info)
-                    # 递归调用获取下一个代理
-                    return self.get_proxy()
-            else:
-                logger.error('代理池为空，无法获取代理')
-                return None
-        # 秘钥提取模式
-        elif spider_config.KEY_EXTRACT:
-            proxies = self.key_proxy_utils()
+        # 清理过期代理
+        smart_proxy_manager.cleanup_expired_proxies()
+        
+        # 优先获取用于爬取的代理（已预热的）
+        proxy_info = smart_proxy_manager.get_proxy_for_crawling()
+        if proxy_info:
+            proxies = smart_proxy_manager.format_proxy_for_requests(proxy_info)
+            logger.info(f'使用已预热代理: {proxy_info.server} (第{proxy_info.used_count + 1}次使用)')
             return proxies
-        else:
-            logger.warning('使用代理时，必须选择http提取或秘钥提取中的一个')
-            exit()
-        pass
+        
+        # 检查是否需要获取更多代理
+        if smart_proxy_manager.should_fetch_more_proxies():
+            logger.info("需要获取新代理")
+            if self.fetch_new_proxies():
+                # 获取新代理后，先尝试获取预热代理
+                proxy_info = smart_proxy_manager.get_proxy_for_warmup()
+                if proxy_info:
+                    proxies = smart_proxy_manager.format_proxy_for_requests(proxy_info)
+                    logger.info(f'使用新代理(需预热): {proxy_info.server}')
+                    return proxies
+        
+        # 如果还有未预热的代理，使用它们
+        proxy_info = smart_proxy_manager.get_proxy_for_warmup()
+        if proxy_info:
+            proxies = smart_proxy_manager.format_proxy_for_requests(proxy_info)
+            logger.info(f'使用未预热代理: {proxy_info.server}')
+            return proxies
+        
+        logger.error('无可用代理')
+        return None
+    
+    def extract_proxy_server(self, proxy_dict):
+        """从代理字典中提取服务器地址"""
+        if proxy_dict and 'http' in proxy_dict:
+            # proxy_dict格式: {'http': 'http://ip:port', 'https': 'http://ip:port'}
+            proxy_url = proxy_dict['http']
+            if proxy_url.startswith('http://'):
+                return proxy_url[7:]  # 去掉 'http://' 前缀
+        return None
+    
+    def fetch_new_proxies(self):
+        """获取新代理"""
+        if not spider_config.HTTP_EXTRACT:
+            return False
+            
+        proxy_url = spider_config.HTTP_LINK
+        if not proxy_url:
+            logger.error('未配置代理API地址')
+            return False
+        
+        try:
+            r = requests.get(proxy_url, timeout=10)
+            r_json = r.json()
+            
+            if 'data' in r_json and r_json['data']:
+                added_count = 0
+                for proxy_data in r_json['data']:
+                    if smart_proxy_manager.add_proxy(proxy_data):
+                        added_count += 1
+                
+                logger.info(f'成功添加 {added_count} 个新代理')
+                return added_count > 0
+            else:
+                logger.error(f'代理API返回格式错误: {r_json}')
+                return False
+                
+        except Exception as e:
+            logger.error(f'获取代理失败: {e}')
+            return False
 
     def test_proxy(self, ip, port, timeout=5):
         """

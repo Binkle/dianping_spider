@@ -20,6 +20,8 @@
 
 """
 import sys
+import time
+import random
 
 from bs4 import BeautifulSoup
 
@@ -27,6 +29,9 @@ from utils.logger import logger
 from utils.get_font_map import get_search_map_file
 from utils.requests_utils import requests_util
 from utils.spider_config import spider_config
+from utils.session_manager import session_manager
+from utils.param_generator import param_generator
+from utils.advanced_anti_detection import advanced_anti_detection
 
 
 class Search():
@@ -35,17 +40,40 @@ class Search():
 
     def search(self, search_url, request_type='proxy, cookie', last_chance=False):
         """
-        搜索
-        :param key_word: 关键字
-        :param only_need_first: 只需要第一条
-        :param needed_pages: 需要多少页
+        搜索，使用高级反检测策略
+        :param search_url: 搜索URL
+        :param request_type: 请求类型
+        :param last_chance: 是否最后一次机会
         :return:
         """
         if self.is_ban and spider_config.USE_COOKIE_POOL is False:
             logger.warning('搜索页请求被ban，程序终止')
             sys.exit()
 
-        r = requests_util.get_requests(search_url, request_type=request_type)
+        # 使用高级反检测策略
+        logger.info("使用高级反检测策略进行搜索")
+        
+        # 模拟真实的搜索行为流程
+        r = advanced_anti_detection.simulate_search_behavior(search_url)
+        
+        if r is None:
+            logger.error("高级反检测策略失败")
+            if last_chance:
+                self.is_ban = True
+                return None
+            # 重试一次，但使用传统方法
+            logger.info("尝试使用传统方法重试")
+            time.sleep(random.uniform(10, 20))  # 长时间等待
+            return self.search(search_url=search_url, request_type=request_type, last_chance=True)
+        
+        # 检查响应质量
+        is_good, message = advanced_anti_detection.check_response_quality(r)
+        if not is_good:
+            logger.warning(f"响应质量检查失败: {message}")
+            if last_chance:
+                self.is_ban = True
+                return None
+            return self.search(search_url=search_url, request_type=request_type, last_chance=True)
         # 给一次retry的机会，如果依然403则判断为被ban
         if r.status_code == 403:
             if last_chance is True:
