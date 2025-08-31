@@ -19,8 +19,8 @@
           ┗━┻━┛   ┗━┻━┛
 
 """
-from utils.config import global_config, require_config
-from utils.logger import logger
+from dianping_spider.utils.config import global_config, require_config
+from dianping_spider.utils.logger import logger
 
 
 
